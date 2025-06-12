@@ -16,7 +16,7 @@ make.processed.data <- function(formula, data, cache.subjects, K, pheno.id, geno
   #data <- data[matching,]
   if(!is.null(K)){
     ### TODO: further selection based on whether K does not have an individual in cach or data
-    K <- K[include.subjects, include.subjects]
+    K <- K[which(rownames(K) %in% include.subjects), which(colnames(K) %in% include.subjects)]
   }
   if(length(covariates) > 0){
     covariate.matrix <- matrix(NA, nrow=nrow(data), ncol=length(covariates))
