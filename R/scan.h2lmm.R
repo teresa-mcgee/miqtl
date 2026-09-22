@@ -64,6 +64,12 @@
 #' @param mem.per.locus.mb DEFAULT: NULL. An estimate (megabytes) of the memory a single locus fit requires; when supplied,
 #' available memory (SLURM allocation, cgroup limit, or OS-level, in that order) is used to additionally cap num.cores="auto".
 #' NULL skips memory-based capping.
+#' @param GxT.treatment DEFAULT: NULL. Column name in data of a treatment/environment variable. When specified, each locus
+#' additionally fits a genotype-by-treatment interaction model (locus main effect + locus:treatment) and reports a second
+#' LRT (LOD.GxT/p.value.GxT/df.GxT) of that interaction model against the locus main-effect model -- i.e. the null for
+#' this test is the main-effect model, not the covariates-only null, since the question is whether the locus effect
+#' differs by treatment, not whether a locus effect exists at all (that is still LOD/p.value, unchanged). Only supported
+#' with locus.as.fixed=TRUE; not combined with do.augment (augmented rows have no real treatment assignment).
 #' @export
 #' @examples scan.h2lmm()
 scan.h2lmm <- function(genomecache, data,
@@ -76,26 +82,38 @@ scan.h2lmm <- function(genomecache, data,
                        just.these.loci=NULL,
                        print.locus.fit=FALSE, use.progress.bar=TRUE, debug.single.fit=FALSE,
                        num.cores="auto", mem.per.locus.mb=NULL,
+                       GxT.treatment=NULL,
                        ...){
   model <- model[1]
   p.value.method <- p.value.method[1]
-  
+
+  if(!is.null(GxT.treatment) & !locus.as.fixed){
+    stop("GxT.treatment is currently only supported with locus.as.fixed=TRUE", call.=FALSE)
+  }
+  if(!is.null(GxT.treatment) & do.augment){
+    stop("GxT.treatment is not supported combined with do.augment (augmented rows have no real treatment assignment)", call.=FALSE)
+  }
+  if(!is.null(GxT.treatment) & return.allele.effects){
+    return.allele.effects <- FALSE
+    cat("Allele effects are not yet decomposed for GxT interaction terms; setting return.allele.effects to FALSE\n")
+  }
+
   h <- DiploprobReader$new(genomecache)
   founders <- h$getFounders()
   num.founders <- length(founders)
   loci <- h$getLoci()
-  
-  ## Case where there are replicates and K is not specified, 
+
+  ## Case where there are replicates and K is not specified,
   ## then K is forced to be identity
   if(pheno.id != geno.id & is.null(K)){
     K <- diag(length(unique(data[,geno.id])))
     rownames(K) <- colnames(K) <- unique(data[,geno.id])
   }
-  
+
   cache.subjects <- rownames(h$getLocusMatrix(loci[1], model="additive"))
-  data.and.K <- make.processed.data(formula=formula, data=data, 
-                                    cache.subjects=cache.subjects, K=K, 
-                                    pheno.id=pheno.id, geno.id=geno.id)
+  data.and.K <- make.processed.data(formula=formula, data=data,
+                                    cache.subjects=cache.subjects, K=K,
+                                    pheno.id=pheno.id, geno.id=geno.id, GxT.treatment=GxT.treatment)
   data <- data.and.K$data
   K <- data.and.K$K
   ## Check that some IDs are matching between data and K
@@ -253,17 +271,25 @@ scan.h2lmm <- function(genomecache, data,
   }
   allele.effects <- NULL
   LOD.vec <- p.vec <- df <- rep(NA, length(loci))
+  LOD.GxT.vec <- p.GxT.vec <- df.GxT <- NULL
+  if(!is.null(GxT.treatment)){
+    LOD.GxT.vec <- p.GxT.vec <- df.GxT <- rep(NA, length(loci))
+  }
   null.data <- data
   ## Preallocated here (rather than on the first loop iteration, as before)
   ## since both this and allele.effects below must exist before dispatch,
   ## whether the locus loop below runs serially or in parallel.
   if(use.multi.impute){
     MI.LOD <- MI.p.value <- matrix(NA, nrow=num.imp, ncol=length(loci))
+    MI.LOD.GxT <- MI.p.value.GxT <- NULL
+    if(!is.null(GxT.treatment)){
+      MI.LOD.GxT <- MI.p.value.GxT <- matrix(NA, nrow=num.imp, ncol=length(loci))
+    }
   }
   else{
-    MI.LOD <- MI.p.value <- NULL
+    MI.LOD <- MI.p.value <- MI.LOD.GxT <- MI.p.value.GxT <- NULL
   }
-  
+
   if(return.allele.effects){ 
     if(use.multi.impute){
       allele.effects <- array(NA, dim=c(length(founders), length(loci), num.imp),
@@ -291,6 +317,7 @@ scan.h2lmm <- function(genomecache, data,
   ## parent process's variables.
   fit.one.locus <- function(i){
     result <- list(LOD=NA, p.value=NA, df=NA, MI.LOD.col=NULL, MI.p.value.col=NULL,
+                   LOD.GxT=NA, p.value.GxT=NA, df.GxT=NA, MI.LOD.GxT.col=NULL, MI.p.value.GxT.col=NULL,
                    allele.effects=NULL, locus.effect.type=NULL, fit1=NULL)
     if(use.multi.impute){
       diplotype.prob.matrix <- h$getLocusMatrix(loci[i], model="full", subjects=non.augment.subjects)
@@ -317,6 +344,7 @@ scan.h2lmm <- function(genomecache, data,
                                    use.lmer=use.lmer, impute.map=impute.map,
                                    use.par=use.par, fix.par=fix.par, fit0=fit0.for.mi, do.augment=do.augment,
                                    MX0=null.MX0, My=null.My,
+                                   GxT.treatment=GxT.treatment, treatment=if(!is.null(GxT.treatment)) data[,GxT.treatment] else NULL,
                                    brute=brute, seed=seed)
       result$MI.LOD.col <- fit1$LOD
       result$MI.p.value.col <- fit1$p.value
@@ -324,6 +352,12 @@ scan.h2lmm <- function(genomecache, data,
       result$p.value <- median(fit1$p.value)
       if(return.allele.effects){
         result$allele.effects <- fit1$allele.effects
+      }
+      if(!is.null(GxT.treatment)){
+        result$MI.LOD.GxT.col <- fit1$LOD.GxT
+        result$MI.p.value.GxT.col <- fit1$p.value.GxT
+        result$LOD.GxT <- median(fit1$LOD.GxT)
+        result$p.value.GxT <- median(fit1$p.value.GxT)
       }
     }
     else{ ## ROP
@@ -354,6 +388,7 @@ scan.h2lmm <- function(genomecache, data,
       }
       else{
         if(locus.as.fixed){
+          X.locus <- X # kept for GxT interaction columns, before X is cbound with the null design below
           X <- cbind(fit0$x, X)
           fit1 <- lmmbygls(formula=locus.formula,
                            y=y, X=X,
@@ -367,6 +402,25 @@ scan.h2lmm <- function(genomecache, data,
 
           if(return.allele.effects){
             result$allele.effects <- get.allele.effects.from.fixef(fit=fit1, founders=founders, allele.in.intercept=founders[max.column])
+          }
+
+          ## GxT interaction test: the null for THIS test is the locus
+          ## main-effect model (fit1), not the covariates-only null (fit0) --
+          ## the question is whether the locus effect differs by treatment,
+          ## not whether a locus effect exists at all. Reuses fit0$M/logDetV/
+          ## null.MX0/null.My exactly as fit1 did above, since the interaction
+          ## design is just more columns appended to the same null block.
+          if(!is.null(GxT.treatment)){
+            X.int <- make.interaction.design(X=X.locus, treatment=data[,GxT.treatment])
+            fit1.GxT <- lmmbygls(formula=make.GxT.formula(formula=formula, X=X.locus, GxT.treatment=GxT.treatment, do.augment=do.augment),
+                                 y=y, X=cbind(fit1$x, X.int),
+                                 eigen.K=fit0$eigen.K, K=fit0$K, weights=weights,
+                                 use.par="h2", fix.par=fix.par, M=fit0$M, logDetV=fit0$logDetV,
+                                 MX0=null.MX0, My=null.My,
+                                 brute=brute)
+            result$LOD.GxT <- log10(exp(fit1.GxT$logLik - fit1$logLik))
+            result$p.value.GxT <- get.p.value(fit0=fit1, fit1=fit1.GxT, method=p.value.method)
+            result$df.GxT <- fit1.GxT$rank - fit1$rank
           }
         }
         else{
@@ -447,10 +501,20 @@ scan.h2lmm <- function(genomecache, data,
       if(use.multi.impute){ allele.effects[,i,] <- r$allele.effects }
       else{ allele.effects[,i] <- r$allele.effects }
     }
+    if(!is.null(GxT.treatment)){
+      LOD.GxT.vec[i] <- r$LOD.GxT
+      p.GxT.vec[i] <- r$p.value.GxT
+      if(!is.null(r$df.GxT)){ df.GxT[i] <- r$df.GxT }
+      if(use.multi.impute){
+        MI.LOD.GxT[,i] <- r$MI.LOD.GxT.col
+        MI.p.value.GxT[,i] <- r$MI.p.value.GxT.col
+      }
+    }
   }
   locus.effect.type <- results[[length(loci)]]$locus.effect.type
   last.fit1 <- results[[length(loci)]]$fit1
   names(LOD.vec) <- names(p.vec) <- names(df) <- loci
+  if(!is.null(GxT.treatment)){ names(LOD.GxT.vec) <- names(p.GxT.vec) <- names(df.GxT) <- loci }
   output <- list(LOD=LOD.vec,
                  p.value=p.vec,
                  MI.LOD=MI.LOD,
@@ -467,7 +531,13 @@ scan.h2lmm <- function(genomecache, data,
                  model.type=model,
                  p.value.method=p.value.method,
                  impute.map=impute.map,
-                 locus.effect.type=locus.effect.type)
+                 locus.effect.type=locus.effect.type,
+                 GxT.treatment=GxT.treatment,
+                 LOD.GxT=LOD.GxT.vec,
+                 p.value.GxT=p.GxT.vec,
+                 df.GxT=df.GxT,
+                 MI.LOD.GxT=MI.LOD.GxT,
+                 MI.p.value.GxT=MI.p.value.GxT)
   if(length(just.these.loci) == 1){ output$fit1 <- last.fit1 }
   if(pheno.id != geno.id & !is.null(K)){ rownames(Z) <- as.character(data[, pheno.id]); output$Z <- Z }
   return(output)

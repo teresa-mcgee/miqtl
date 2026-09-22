@@ -32,6 +32,7 @@ scan.h2lmm(
   debug.single.fit = FALSE,
   num.cores = "auto",
   mem.per.locus.mb = NULL,
+  GxT.treatment = NULL,
   ...
 )
 }
@@ -124,6 +125,13 @@ on Windows (falls back to 1) or in combination with debug.single.fit=TRUE.}
 \item{mem.per.locus.mb}{DEFAULT: NULL. An estimate (megabytes) of the memory a single locus fit requires; when supplied,
 available memory (SLURM allocation, cgroup limit, or OS-level, in that order) is used to additionally cap num.cores="auto".
 NULL skips memory-based capping.}
+
+\item{GxT.treatment}{DEFAULT: NULL. Column name in data of a treatment/environment variable. When specified, each locus
+additionally fits a genotype-by-treatment interaction model (locus main effect + locus:treatment) and reports a second
+LRT (LOD.GxT/p.value.GxT/df.GxT) of that interaction model against the locus main-effect model -- i.e. the null for
+this test is the main-effect model, not the covariates-only null, since the question is whether the locus effect
+differs by treatment, not whether a locus effect exists at all (that is still LOD/p.value, unchanged). Only supported
+with locus.as.fixed=TRUE; not combined with do.augment (augmented rows have no real treatment assignment).}
 }
 \description{
 This function primarily takes a formula, data frame, and genome cache to run a genome scan.

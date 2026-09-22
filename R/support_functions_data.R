@@ -1,9 +1,14 @@
-make.processed.data <- function(formula, data, cache.subjects, K, pheno.id, geno.id){
+make.processed.data <- function(formula, data, cache.subjects, K, pheno.id, geno.id, GxT.treatment=NULL){
   all.variables <- all.vars(formula)
   covariates <- all.variables[-1]
   lh.formula.string <- unlist(strsplit(Reduce(paste, deparse(formula)), split="~"))[1]
   lh.formula.string <- gsub("[[:space:]]", "", lh.formula.string)
-  covariates <- unique(c(covariates, pheno.id, geno.id))
+  ## GxT.treatment is a separate scan.h2lmm() argument, not part of the
+  ## user's formula, so it must be folded in here explicitly or it would
+  ## bypass model.frame()'s NA-filtering -- subjects with NA treatment would
+  ## silently stay in `data` while being dropped from nothing, breaking row
+  ## alignment against K/the genotype matrices downstream.
+  covariates <- unique(c(covariates, pheno.id, geno.id, GxT.treatment))
   formula.string <- paste(lh.formula.string,
                           paste(covariates, collapse="+"),
                           sep="~")

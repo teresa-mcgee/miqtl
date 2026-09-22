@@ -8,10 +8,15 @@ multi.imput.lmmbygls <- function(formula, data=NULL, pheno.id="SUBJECT.NAME",
                                  brute=TRUE, seed=1, do.augment,
                                  weights=NULL,
                                  MX0=NULL, My=NULL,
+                                 GxT.treatment=NULL, treatment=NULL,
                                  return.allele.effects=FALSE, return.qtl.predictor=FALSE){
   model <- model[1]
   p.value.method <- p.value.method[1]
   eigen.K <- logDetV <- M <- allele.effects <- qtl.predictor <- NULL
+  imp.LOD.GxT <- imp.p.value.GxT <- NULL
+  if(!is.null(GxT.treatment)){
+    imp.LOD.GxT <- imp.p.value.GxT <- rep(0, num.imp)
+  }
   ## For allele effect plots
   if(return.allele.effects){ 
     allele.effects <- matrix(NA, nrow=length(founders), ncol=num.imp,
@@ -78,6 +83,7 @@ multi.imput.lmmbygls <- function(formula, data=NULL, pheno.id="SUBJECT.NAME",
     }
     else{
       if(locus.as.fixed){
+        X.locus <- X # kept for GxT interaction columns, before X is cbound with the null design below
         X <- cbind(fit0$x, X)
         fit1 <- lmmbygls(formula=locus.formula, pheno.id=pheno.id, eigen.K=eigen.K, K=K,
                          y=y, X=X,
@@ -91,13 +97,28 @@ multi.imput.lmmbygls <- function(formula, data=NULL, pheno.id="SUBJECT.NAME",
         imp.LOD[i] <- log10(exp(imp.logLik[i] - fit0$logLik))
         imp.p.value[i] <- get.p.value(fit0=fit0, fit1=fit1, method=p.value.method)
         fit1$locus.effect.type <- "fixed"
-        
+
         if(return.allele.effects){
           allele.effects[,i] <- get.allele.effects.from.fixef(fit=fit1, founders=founders, allele.in.intercept=founders[max.column])
         }
         if(return.qtl.predictor){
           qtl.predictor[,i] <- regress.out.qtl(fit1=fit1, null.formula=null.formula, alt.formula=locus.formula,
                                                locus.as.fixed=locus.as.fixed)
+        }
+        ## GxT interaction test for this imputation: null is fit1 (locus
+        ## main effect), not fit0 -- same rationale as scan.h2lmm()'s ROP
+        ## path. Reuses fit0/fit1's M/logDetV/MX0/My exactly as fit1 did.
+        if(!is.null(GxT.treatment)){
+          X.int <- make.interaction.design(X=X.locus, treatment=treatment)
+          fit1.GxT <- lmmbygls(formula=make.GxT.formula(formula=formula, X=X.locus, GxT.treatment=GxT.treatment, do.augment=do.augment),
+                               pheno.id=pheno.id, eigen.K=eigen.K, K=K,
+                               y=y, X=cbind(fit1$x, X.int),
+                               logDetV=logDetV, M=M,
+                               use.par="h2", fix.par=fix.par,
+                               MX0=MX0, My=My,
+                               brute=brute, weights=weights)
+          imp.LOD.GxT[i] <- log10(exp(fit1.GxT$logLik - fit1$logLik))
+          imp.p.value.GxT[i] <- get.p.value(fit0=fit1, fit1=fit1.GxT, method=p.value.method)
         }
       }
       else{
@@ -119,9 +140,11 @@ multi.imput.lmmbygls <- function(formula, data=NULL, pheno.id="SUBJECT.NAME",
       }
     }
   }
-  return(list(h2=imp.h2, 
+  return(list(h2=imp.h2,
               LOD=imp.LOD,
               p.value=imp.p.value,
+              LOD.GxT=imp.LOD.GxT,
+              p.value.GxT=imp.p.value.GxT,
               allele.effects=allele.effects,
               qtl.predictor=qtl.predictor,
               locus.effect.type=fit1$locus.effect.type))

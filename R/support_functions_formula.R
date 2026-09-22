@@ -53,3 +53,47 @@ process.random.formula <- function(geno.id){
   random.formula <- as.formula(paste("~", paste(geno.id, "1", sep=" - ")))
   return(random.formula)
 }
+make.GxT.formula <- function(formula, X, GxT.treatment, do.augment){
+  ## Cosmetic only, for output$formula.GxT labeling: whenever a per-locus
+  ## fit is built from y/X directly (as every GxT call site is), lmmbygls()'s
+  ## formula argument is never actually used to construct the design matrix
+  ## (see the `if(!is.null(data) & is.null(y))` branch in lmmbygls()), so
+  ## this does not need to exactly reproduce make.interaction.design()'s
+  ## column construction -- only to describe it.
+  this.formula <- make.alt.formula(formula=formula, X=X, do.augment=do.augment)
+  this.formula.string <- Reduce(paste, deparse(this.formula))
+  locus.names <- gsub(pattern="/", replacement=".", x=colnames(X), fixed=TRUE)
+  interaction.terms <- paste(locus.names, GxT.treatment, sep=":")
+  as.formula(paste(this.formula.string, paste(interaction.terms, collapse=" + "), sep=" + "))
+}
+## Builds the locus x treatment interaction design columns for a GxT test.
+## X is the already reference-column-dropped locus dosage matrix used for
+## the main-effect fit (as-is; no additional collinearity handling needed
+## on the genotype side). `treatment` is dummy-coded with standard
+## treatment contrasts (reference level dropped) for factors/character
+## vectors with >2 levels; a 2-level factor collapses to a single dummy
+## column; a numeric treatment (binary indicator or continuous) is used
+## as-is, without model.matrix()'s intercept handling, since there is no
+## reference level to drop.
+make.interaction.design <- function(X, treatment){
+  ## NA treatment values should already be impossible here -- make.processed.data()
+  ## folds GxT.treatment into its covariates so NA rows are dropped upstream via
+  ## model.frame(). Checked explicitly (rather than left to silently misalign)
+  ## because model.matrix() below would otherwise drop NA rows on its own and
+  ## desync row counts against X without any other warning.
+  if(anyNA(treatment)){
+    stop("make.interaction.design(): treatment contains NA values; these should have been removed upstream by make.processed.data()", call.=FALSE)
+  }
+  if(is.numeric(treatment)){
+    T.design <- matrix(treatment, ncol=1, dimnames=list(NULL, "trt"))
+  }
+  else{
+    treatment <- as.factor(treatment)
+    T.design <- model.matrix(~treatment)[, -1, drop=FALSE]
+    colnames(T.design) <- sub(pattern="^treatment", replacement="", x=colnames(T.design))
+  }
+  interaction.design <- do.call(cbind, lapply(seq_len(ncol(T.design)), function(j) X * T.design[, j]))
+  colnames(interaction.design) <- as.vector(outer(colnames(X), colnames(T.design), paste, sep="."))
+  rownames(interaction.design) <- rownames(X)
+  return(interaction.design)
+}
