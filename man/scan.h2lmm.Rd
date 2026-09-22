@@ -30,6 +30,8 @@ scan.h2lmm(
   print.locus.fit = FALSE,
   use.progress.bar = TRUE,
   debug.single.fit = FALSE,
+  num.cores = "auto",
+  mem.per.locus.mb = NULL,
   ...
 )
 }
@@ -110,7 +112,18 @@ will also be output as fit1.}
 \item{use.progress.bar}{DEFAULT: TRUE. If TRUE, a progress bar is used.}
 
 \item{debug.single.fit}{DEFAULT: FALSE. If TRUE, a browser() call is activated after the first locus is fit. This option
-allows developers to more easily debug while still using the actual R package.}
+allows developers to more easily debug while still using the actual R package. Forces serial execution (num.cores=1)
+since browser() cannot meaningfully pause a forked parallel worker.}
+
+\item{num.cores}{DEFAULT: "auto". Number of cores to parallelize the locus loop across (loci are independent given the
+null model, so this is exact, not an approximation). "auto" sizes it from the CPU allocation actually available to
+this process (respecting a SLURM job's allocation, not just the host's total core count) via determine.scan.cores().
+An integer forces that many cores, capped at the detected budget. 1 forces the original serial behavior. Not supported
+on Windows (falls back to 1) or in combination with debug.single.fit=TRUE.}
+
+\item{mem.per.locus.mb}{DEFAULT: NULL. An estimate (megabytes) of the memory a single locus fit requires; when supplied,
+available memory (SLURM allocation, cgroup limit, or OS-level, in that order) is used to additionally cap num.cores="auto".
+NULL skips memory-based capping.}
 }
 \description{
 This function primarily takes a formula, data frame, and genome cache to run a genome scan.

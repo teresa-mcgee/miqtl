@@ -54,18 +54,28 @@
 #' @param print.locus.fit DEFAULT: FALSE. If TRUE, prints out how many loci have been fit currently.
 #' @param use.progress.bar DEFAULT: TRUE. If TRUE, a progress bar is used.
 #' @param debug.single.fit DEFAULT: FALSE. If TRUE, a browser() call is activated after the first locus is fit. This option
-#' allows developers to more easily debug while still using the actual R package.
+#' allows developers to more easily debug while still using the actual R package. Forces serial execution (num.cores=1)
+#' since browser() cannot meaningfully pause a forked parallel worker.
+#' @param num.cores DEFAULT: "auto". Number of cores to parallelize the locus loop across (loci are independent given the
+#' null model, so this is exact, not an approximation). "auto" sizes it from the CPU allocation actually available to
+#' this process (respecting a SLURM job's allocation, not just the host's total core count) via determine.scan.cores().
+#' An integer forces that many cores, capped at the detected budget. 1 forces the original serial behavior. Not supported
+#' on Windows (falls back to 1) or in combination with debug.single.fit=TRUE.
+#' @param mem.per.locus.mb DEFAULT: NULL. An estimate (megabytes) of the memory a single locus fit requires; when supplied,
+#' available memory (SLURM allocation, cgroup limit, or OS-level, in that order) is used to additionally cap num.cores="auto".
+#' NULL skips memory-based capping.
 #' @export
 #' @examples scan.h2lmm()
-scan.h2lmm <- function(genomecache, data, 
+scan.h2lmm <- function(genomecache, data,
                        formula, K=NULL,
                        model=c("additive", "full"), locus.as.fixed=TRUE, return.allele.effects=FALSE,
                        p.value.method=c("LRT", "ANOVA"),
-                       use.par="h2", use.multi.impute=TRUE, num.imp=11, chr="all", brute=TRUE, use.fix.par=TRUE, 
+                       use.par="h2", use.multi.impute=TRUE, num.imp=11, chr="all", brute=TRUE, use.fix.par=TRUE,
                        seed=1, pheno.id="SUBJECT.NAME", geno.id="SUBJECT.NAME",
-                       weights=NULL, do.augment=FALSE, use.full.null=FALSE, added.data.points=1, 
+                       weights=NULL, do.augment=FALSE, use.full.null=FALSE, added.data.points=1,
                        just.these.loci=NULL,
                        print.locus.fit=FALSE, use.progress.bar=TRUE, debug.single.fit=FALSE,
+                       num.cores="auto", mem.per.locus.mb=NULL,
                        ...){
   model <- model[1]
   p.value.method <- p.value.method[1]
@@ -241,9 +251,18 @@ scan.h2lmm <- function(genomecache, data,
     null.MX0 <- if(!is.null(resolved.null.M$M)) resolved.null.M$M %*% fit0$x else fit0$x
     null.My  <- if(!is.null(resolved.null.M$M)) resolved.null.M$M %*% data$y else data$y
   }
-  MI.LOD <- MI.p.value <- allele.effects <- NULL
+  allele.effects <- NULL
   LOD.vec <- p.vec <- df <- rep(NA, length(loci))
   null.data <- data
+  ## Preallocated here (rather than on the first loop iteration, as before)
+  ## since both this and allele.effects below must exist before dispatch,
+  ## whether the locus loop below runs serially or in parallel.
+  if(use.multi.impute){
+    MI.LOD <- MI.p.value <- matrix(NA, nrow=num.imp, ncol=length(loci))
+  }
+  else{
+    MI.LOD <- MI.p.value <- NULL
+  }
   
   if(return.allele.effects){ 
     if(use.multi.impute){
@@ -263,17 +282,17 @@ scan.h2lmm <- function(genomecache, data,
   ## More efficient - does not require the formula/data processing steps
   y <- data$y
 
-  # Progress bar
-  if(!print.locus.fit){
-    if(use.progress.bar){
-      pb <- txtProgressBar(min=0, max=length(loci), style=3)
-    }
-  }
-  for(i in 1:length(loci)){
+  ## Per-locus fit, extracted into a function so it can be dispatched either
+  ## serially (original behavior) or across parallel workers: each locus's
+  ## fit only depends on quantities already fixed above (fit0/fit0.REML/
+  ## fix.par/null.MX0/null.My), so loci are independent given those. Returns
+  ## a small list of results rather than writing into the shared LOD.vec/
+  ## p.vec/etc vectors directly, since parallel workers can't mutate the
+  ## parent process's variables.
+  fit.one.locus <- function(i){
+    result <- list(LOD=NA, p.value=NA, df=NA, MI.LOD.col=NULL, MI.p.value.col=NULL,
+                   allele.effects=NULL, locus.effect.type=NULL, fit1=NULL)
     if(use.multi.impute){
-      if(i == 1){ # only at the beginning
-        MI.LOD <- MI.p.value <- matrix(NA, nrow=num.imp, ncol=length(loci))
-      }
       diplotype.prob.matrix <- h$getLocusMatrix(loci[i], model="full", subjects=non.augment.subjects)
       if(do.augment){
         if(model=="additive"){
@@ -299,13 +318,12 @@ scan.h2lmm <- function(genomecache, data,
                                    use.par=use.par, fix.par=fix.par, fit0=fit0.for.mi, do.augment=do.augment,
                                    MX0=null.MX0, My=null.My,
                                    brute=brute, seed=seed)
-      MI.LOD[,i] <- fit1$LOD
-      MI.p.value[,i] <- fit1$p.value
-      LOD.vec[i] <- median(fit1$LOD)
-      p.vec[i] <- median(fit1$p.value)
-      
+      result$MI.LOD.col <- fit1$LOD
+      result$MI.p.value.col <- fit1$p.value
+      result$LOD <- median(fit1$LOD)
+      result$p.value <- median(fit1$p.value)
       if(return.allele.effects){
-        allele.effects[,i,] <- fit1$allele.effects
+        result$allele.effects <- fit1$allele.effects
       }
     }
     else{ ## ROP
@@ -329,10 +347,10 @@ scan.h2lmm <- function(genomecache, data,
         rownames(X) <- c(X.names, paste0("augment.obs", 1:augment.n))
       }
       if(use.lmer){
-        data <- cbind(null.data, X)
-        fit1 <- lmmbylmer(formula=locus.formula, data=data, REML=FALSE, weights=weights)
-        LOD.vec[i] <- log10(exp(as.numeric(logLik(fit1)) - as.numeric(logLik(fit0))))
-        p.vec[i] <- pchisq(q=-2*(as.numeric(logLik(fit0)) - as.numeric(logLik(fit1))), df=length(fixef(fit1))-length(fixef(fit0)), lower.tail=FALSE)
+        locus.data <- cbind(null.data, X)
+        fit1 <- lmmbylmer(formula=locus.formula, data=locus.data, REML=FALSE, weights=weights)
+        result$LOD <- log10(exp(as.numeric(logLik(fit1)) - as.numeric(logLik(fit0))))
+        result$p.value <- pchisq(q=-2*(as.numeric(logLik(fit0)) - as.numeric(logLik(fit1))), df=length(fixef(fit1))-length(fixef(fit0)), lower.tail=FALSE)
       }
       else{
         if(locus.as.fixed){
@@ -343,12 +361,12 @@ scan.h2lmm <- function(genomecache, data,
                            use.par="h2", fix.par=fix.par, M=fit0$M, logDetV=fit0$logDetV,
                            MX0=null.MX0, My=null.My,
                            brute=brute)
-          LOD.vec[i] <- log10(exp(fit1$logLik - fit0$logLik))
-          p.vec[i] <- get.p.value(fit0=fit0, fit1=fit1, method=p.value.method)
-          df[i] <- fit1$rank
-          
+          result$LOD <- log10(exp(fit1$logLik - fit0$logLik))
+          result$p.value <- get.p.value(fit0=fit0, fit1=fit1, method=p.value.method)
+          result$df <- fit1$rank
+
           if(return.allele.effects){
-            allele.effects[,i] <- get.allele.effects.from.fixef(fit=fit1, founders=founders, allele.in.intercept=founders[max.column])
+            result$allele.effects <- get.allele.effects.from.fixef(fit=fit1, founders=founders, allele.in.intercept=founders[max.column])
           }
         }
         else{
@@ -357,25 +375,81 @@ scan.h2lmm <- function(genomecache, data,
                                   eigen.K=fit0$eigen.K, K=fit0$K, Z=X, weights=weights,
                                   use.par="h2", null.h2=fix.par,
                                   brute=brute)
-          LOD.vec[i] <- log10(exp(fit1$REML.logLik - fit0.REML$REML.logLik))
-          p.vec[i] <- get.p.value(fit0=fit0.REML, fit1=fit1, method=p.value.method)
-          df[i] <- 1
+          result$LOD <- log10(exp(fit1$REML.logLik - fit0.REML$REML.logLik))
+          result$p.value <- get.p.value(fit0=fit0.REML, fit1=fit1, method=p.value.method)
+          result$df <- 1
           if(return.allele.effects){
-            allele.effects[,i] <- get.allele.effects.from.ranef(fit=fit1, founders=founders)
+            result$allele.effects <- get.allele.effects.from.ranef(fit=fit1, founders=founders)
           }
         }
       }
     }
-    if(debug.single.fit){ browser() }
-    # Print out locus fit
-    if(print.locus.fit){ cat(paste("locus", i, "out of", length(loci)), "\n") }
-    else{
-      if(use.progress.bar){
-        # Update progress bar
-        setTxtProgressBar(pb, i)
+    result$locus.effect.type <- fit1$locus.effect.type
+    if(length(loci) == 1){ result$fit1 <- fit1 } # only ever consumed when just.these.loci has length 1
+    return(result)
+  }
+
+  ## Resolve how many cores to use. "auto" sizes off the CPU allocation
+  ## actually available to this process (see determine.scan.cores()); an
+  ## explicit num.cores is capped at that same budget, never exceeded.
+  ## debug.single.fit's browser() cannot meaningfully pause a forked worker,
+  ## so it forces serial execution.
+  requested.cores <- if(identical(num.cores, "auto")) NULL else num.cores
+  num.cores.resolved <- determine.scan.cores(requested.cores=requested.cores,
+                                             mem.per.locus.mb=mem.per.locus.mb,
+                                             n.loci=length(loci),
+                                             verbose=use.progress.bar | print.locus.fit)
+  if(debug.single.fit & num.cores.resolved > 1){
+    cat("debug.single.fit=TRUE requires serial execution (browser() cannot pause a forked worker); forcing num.cores=1 for this run.\n")
+    num.cores.resolved <- 1
+  }
+
+  results <- vector("list", length(loci))
+  if(num.cores.resolved > 1){
+    chunks <- parallel::splitIndices(length(loci), num.cores.resolved)
+    cat(sep="", "Running ", length(loci), " loci across ", num.cores.resolved, " cores (", length(chunks), " chunks)...\n")
+    chunk.results <- parallel::mclapply(chunks, function(idx){ lapply(idx, fit.one.locus) },
+                                        mc.cores=num.cores.resolved, mc.preschedule=TRUE)
+    for(chunk.i in seq_along(chunks)){
+      results[chunks[[chunk.i]]] <- chunk.results[[chunk.i]]
+    }
+    cat("Parallel locus loop complete.\n")
+  }
+  else{
+    if(!print.locus.fit & use.progress.bar){
+      pb <- txtProgressBar(min=0, max=length(loci), style=3)
+    }
+    for(i in 1:length(loci)){
+      results[[i]] <- fit.one.locus(i)
+      if(debug.single.fit){ browser() }
+      # Print out locus fit
+      if(print.locus.fit){ cat(paste("locus", i, "out of", length(loci)), "\n") }
+      else{
+        if(use.progress.bar){
+          # Update progress bar
+          setTxtProgressBar(pb, i)
+        }
       }
     }
   }
+
+  ## Consolidate per-locus results back into the scan-level output structures.
+  for(i in 1:length(loci)){
+    r <- results[[i]]
+    LOD.vec[i] <- r$LOD
+    p.vec[i] <- r$p.value
+    if(!is.null(r$df)){ df[i] <- r$df }
+    if(use.multi.impute){
+      MI.LOD[,i] <- r$MI.LOD.col
+      MI.p.value[,i] <- r$MI.p.value.col
+    }
+    if(return.allele.effects){
+      if(use.multi.impute){ allele.effects[,i,] <- r$allele.effects }
+      else{ allele.effects[,i] <- r$allele.effects }
+    }
+  }
+  locus.effect.type <- results[[length(loci)]]$locus.effect.type
+  last.fit1 <- results[[length(loci)]]$fit1
   names(LOD.vec) <- names(p.vec) <- names(df) <- loci
   output <- list(LOD=LOD.vec,
                  p.value=p.vec,
@@ -393,8 +467,8 @@ scan.h2lmm <- function(genomecache, data,
                  model.type=model,
                  p.value.method=p.value.method,
                  impute.map=impute.map,
-                 locus.effect.type=fit1$locus.effect.type)
-  if(length(just.these.loci) == 1){ output$fit1 <- fit1 }
+                 locus.effect.type=locus.effect.type)
+  if(length(just.these.loci) == 1){ output$fit1 <- last.fit1 }
   if(pheno.id != geno.id & !is.null(K)){ rownames(Z) <- as.character(data[, pheno.id]); output$Z <- Z }
   return(output)
 }

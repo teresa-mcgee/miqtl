@@ -24,6 +24,8 @@ lmmbygls(
   model = TRUE,
   contrasts = NULL,
   verbose = FALSE,
+  MX0 = NULL,
+  My = NULL,
   ...
 )
 }
@@ -63,6 +65,12 @@ which optimizes h2 in terms of the residual likelihood (REML).}
 
 \item{brute}{DEFAULT: TRUE. Internally optim() is used to find ML or REML estimates. It does not explicitly check the boundaries of h2. This option forces
 it to check h2=0, which can occur.}
+
+\item{MX0}{DEFAULT: NULL. Advanced/internal. A precomputed M \%*\% [null design columns], reused across many calls that share the same M (e.g. every
+locus in an EMMAX-style scan with a fixed null h2). When supplied, X must be the full per-locus design (null columns followed by the new columns),
+and only the new columns are multiplied by M. Exact, not an approximation -- purely saves repeated matrix multiplication.}
+
+\item{My}{DEFAULT: NULL. Advanced/internal. A precomputed M \%*\% y, reused across many calls that share the same M and y (as above).}
 
 \item{subset}{Option to subset the data.}
 
