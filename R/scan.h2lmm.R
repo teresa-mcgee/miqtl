@@ -218,13 +218,28 @@ scan.h2lmm <- function(genomecache, data,
         fit0.REML <- lmmbygls(null.formula, data=data, pheno.id=pheno.id, eigen.K=eigen.K, K=K, use.par="h2.REML", weights=weights, brute=brute)
       }
     }
-    ####### EMMA or EMMAX  
+    ####### EMMA or EMMAX
     if(use.fix.par){
       fix.par <- ifelse(locus.as.fixed, fit0$h2, fit0.REML$h2)
     }
     if(!use.fix.par){
       fix.par <- NULL
     }
+  }
+  ## Cache the whitened null design block (M %*% fit0$x) and outcome vector
+  ## (M %*% y) once, genome-wide, rather than recomputing them at every
+  ## locus. This is exact (not an approximation): it is only valid when a
+  ## single fixed h2/M is reused across all loci, i.e. locus.as.fixed=TRUE
+  ## with use.fix.par=TRUE (fix.par non-NULL) -- when fix.par is NULL, h2/M
+  ## are re-optimized per locus and cannot be cached this way. M is derived
+  ## via resolve.gls.M() rather than taken directly as fit0$M, since
+  ## lmmbygls() can resolve a different (but mathematically equivalent) M
+  ## than fit0$M when fix.par==0 -- see resolve.gls.M()'s documentation.
+  null.MX0 <- null.My <- NULL
+  if(locus.as.fixed & !use.lmer & !is.null(fix.par)){
+    resolved.null.M <- resolve.gls.M(fix.par=fix.par, weights=weights, M=fit0$M, logDetV=fit0$logDetV)
+    null.MX0 <- if(!is.null(resolved.null.M$M)) resolved.null.M$M %*% fit0$x else fit0$x
+    null.My  <- if(!is.null(resolved.null.M$M)) resolved.null.M$M %*% data$y else data$y
   }
   MI.LOD <- MI.p.value <- allele.effects <- NULL
   LOD.vec <- p.vec <- df <- rep(NA, length(loci))
@@ -281,8 +296,9 @@ scan.h2lmm <- function(genomecache, data,
                                    weights=weights, locus.as.fixed=locus.as.fixed, return.allele.effects=return.allele.effects,
                                    model=model, p.value.method=p.value.method, founders=founders, pheno.id=pheno.id, num.imp=num.imp,
                                    use.lmer=use.lmer, impute.map=impute.map,
-                                   use.par=use.par, fix.par=fix.par, fit0=fit0.for.mi, do.augment=do.augment, 
-                                   brute=brute, seed=seed) 
+                                   use.par=use.par, fix.par=fix.par, fit0=fit0.for.mi, do.augment=do.augment,
+                                   MX0=null.MX0, My=null.My,
+                                   brute=brute, seed=seed)
       MI.LOD[,i] <- fit1$LOD
       MI.p.value[,i] <- fit1$p.value
       LOD.vec[i] <- median(fit1$LOD)
@@ -321,10 +337,11 @@ scan.h2lmm <- function(genomecache, data,
       else{
         if(locus.as.fixed){
           X <- cbind(fit0$x, X)
-          fit1 <- lmmbygls(formula=locus.formula, 
+          fit1 <- lmmbygls(formula=locus.formula,
                            y=y, X=X,
                            eigen.K=fit0$eigen.K, K=fit0$K, weights=weights,
                            use.par="h2", fix.par=fix.par, M=fit0$M, logDetV=fit0$logDetV,
+                           MX0=null.MX0, My=null.My,
                            brute=brute)
           LOD.vec[i] <- log10(exp(fit1$logLik - fit0$logLik))
           p.vec[i] <- get.p.value(fit0=fit0, fit1=fit1, method=p.value.method)

@@ -1,15 +1,57 @@
-gls.fit <- function(X, y, M, logDetV, ...){
+## Given a fixed h2 (fix.par) and weights, resolves the (M, logDetV) pair
+## that lmmbygls()'s h2.fit()/h2.fit.REML() closures will actually use for
+## that fix.par. This exists so that any caller building a cached MX0/My
+## (e.g. scan.h2lmm()) derives it from the SAME M that will be applied per
+## locus, rather than duplicating this branching logic and risking drift.
+## fix.par==0 is a real, common case (the null model landing on the h2=0
+## boundary) where lmmbygls() takes a NULL-M shortcut even if the caller's
+## own M (e.g. from optimizing h2 down to a boundary of 0 via the general
+## optimizer, which does not take this shortcut) is a non-NULL rotation --
+## mathematically equivalent for a full recompute, but NOT interchangeable
+## for caching, since the cached blocks must be multiplied by the same M
+## that will be used for the new columns.
+resolve.gls.M <- function(fix.par, weights, M=NULL, logDetV=NULL){
+  if(!is.null(fix.par) && fix.par == 0){
+    if(is.null(weights)){
+      return(list(M=NULL, logDetV=0))
+    }
+    else{
+      return(list(M=diag(sqrt(weights)), logDetV=sum(log(1/weights))))
+    }
+  }
+  return(list(M=M, logDetV=logDetV))
+}
+
+## MX0 and My let a caller skip recomputing the whitening transform (M %*%)
+## for pieces of X/y that are unchanged from a previous call. This is exact,
+## not an approximation: M %*% cbind(A, B) == cbind(M %*% A, M %*% B), so as
+## long as M itself hasn't changed, the cached blocks are bit-identical to
+## recomputing them fresh. Valid whenever M is held fixed across calls (e.g.
+## EMMAX-style scans with a fixed null h2/fix.par); NOT valid if M is being
+## re-derived per call (e.g. h2 optimized fresh at every locus).
+## When MX0 is supplied, X must be the FULL design (null columns followed by
+## the new columns, as built by cbind(fit0$x, X.locus)) -- only the columns
+## beyond ncol(MX0) get multiplied by M here.
+gls.fit <- function(X, y, M, logDetV, MX0=NULL, My=NULL, ...){
   n  <- nrow(X)
   # Tranform to uncorrelated Sigma form
-  if(!is.null(M)){
+  if(is.null(My)){
+    if(!is.null(M)){ My <- M %*% y }
+    else{ My <- y }
+  }
+  if(!is.null(MX0)){
+    null.ncol <- ncol(MX0)
+    X.new <- X[, (null.ncol + 1):ncol(X), drop=FALSE]
+    if(!is.null(M)){ MX <- cbind(MX0, M %*% X.new) }
+    else{ MX <- cbind(MX0, X.new) }
+  }
+  else if(!is.null(M)){
     MX <- M %*% X
-    My <- M %*% y
   }
-  if(is.null(M)){ # more efficient than MX <- diag(nrow(X)) %*% X
+  else{ # more efficient than MX <- diag(nrow(X)) %*% X
     MX <- X
-    My <- y
   }
-  
+
   fit <- lm.fit(MX, My, ...)
   fit$rss <- sum(fit$residuals^2)
   fit$sigma2 <- fit$rss/fit$df.residual
@@ -49,6 +91,10 @@ gls.fit <- function(X, y, M, logDetV, ...){
 #' which optimizes h2 in terms of the residual likelihood (REML).
 #' @param brute DEFAULT: TRUE. Internally optim() is used to find ML or REML estimates. It does not explicitly check the boundaries of h2. This option forces
 #' it to check h2=0, which can occur.
+#' @param MX0 DEFAULT: NULL. Advanced/internal. A precomputed M %*% [null design columns], reused across many calls that share the same M (e.g. every
+#' locus in an EMMAX-style scan with a fixed null h2). When supplied, X must be the full per-locus design (null columns followed by the new columns),
+#' and only the new columns are multiplied by M. Exact, not an approximation -- purely saves repeated matrix multiplication.
+#' @param My DEFAULT: NULL. Advanced/internal. A precomputed M %*% y, reused across many calls that share the same M and y (as above).
 #' @param subset Option to subset the data.
 #' @param na.action Determines how NAs are handled.
 #' @param method DEFAULT: "qr". Option used by lm.fit after GLS process is completed.
@@ -57,18 +103,19 @@ gls.fit <- function(X, y, M, logDetV, ...){
 #' @param verbose DEFAULT: FALSE.
 #' @export
 #' @examples lmmbygls()
-lmmbygls <- function(formula, data=NULL, 
+lmmbygls <- function(formula, data=NULL,
                      y=NULL, X=NULL,
                      K=NULL, eigen.K=NULL, fix.par=NULL,
                      M=NULL, logDetV=NULL, weights=NULL, pheno.id="SUBJECT.NAME",
-                     use.par=c("h2", "h2.REML"), 
+                     use.par=c("h2", "h2.REML"),
                      brute=TRUE,
                      subset, na.action,
                      method = "qr",
-                     model = TRUE, 
+                     model = TRUE,
                      contrasts = NULL,
                      verbose = FALSE,
-                     ...) 
+                     MX0=NULL, My=NULL,
+                     ...)
 {
   if(!is.null(data) & is.null(y)){
     call <- match.call()
@@ -76,7 +123,7 @@ lmmbygls <- function(formula, data=NULL,
     m$y <- m$X <- m$K <- m$eigen.K <- m$fix.par <- m$use.par <- NULL
     m$M <- m$logDetV <- m$weights <- m$pheno.id <- NULL
     m$method <- m$model <- m$contrasts <- m$verbose <- NULL
-    m$brute <- m$... <- NULL
+    m$brute <- m$MX0 <- m$My <- m$... <- NULL
     
     m[[1L]] <- quote(stats::model.frame)
     m <- eval.parent(m)
@@ -121,16 +168,11 @@ lmmbygls <- function(formula, data=NULL,
       }
     }
     else{
-      if(fix.par == 0 & is.null(weights)){
-        M <- NULL # more efficient than I
-        logDetV <- 0
-      }
-      if(fix.par == 0 & !is.null(weights)){
-        M <- diag(sqrt(weights))
-        logDetV <- sum(log(1/weights))
-      }
+      resolved <- resolve.gls.M(fix.par=fix.par, weights=weights, M=M, logDetV=logDetV)
+      M <- resolved$M
+      logDetV <- resolved$logDetV
     }
-    fit <- gls.fit(X=X, y=y, M=M, logDetV=logDetV, ...)
+    fit <- gls.fit(X=X, y=y, M=M, logDetV=logDetV, MX0=MX0, My=My, ...)
     if(logLik.only){
       if(verbose){
         cat(sep="", "h2 = ", h2, " : logLik = ", fit$logLik, "\n")
@@ -155,21 +197,20 @@ lmmbygls <- function(formula, data=NULL,
       }
     }
     else{
+      resolved <- resolve.gls.M(fix.par=fix.par, weights=weights, M=M, logDetV=logDetV)
+      M <- resolved$M
+      logDetV <- resolved$logDetV
       if(fix.par == 0 & is.null(weights)){
-        M <- NULL # more efficient than I
-        logDetV <- 0
         d <- rep(1, n)
         Ut <- diag(d)
       }
       if(fix.par == 0 & !is.null(weights)){
-        M <- diag(sqrt(weights))
-        logDetV <- sum(log(1/weights))
         d <- weights
         Ut <- diag(length(d))
       }
     }
-    fit <- gls.fit(X=X, y=y, M=M, logDetV=logDetV, ...)
-    
+    fit <- gls.fit(X=X, y=y, M=M, logDetV=logDetV, MX0=MX0, My=My, ...)
+
     df <- fit$df.residual
     fit$rss <- sum(fit$residuals^2)
     fit$sigma2.reml <- fit$rss/df

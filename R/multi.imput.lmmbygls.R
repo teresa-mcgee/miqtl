@@ -1,12 +1,13 @@
 #' @export
 multi.imput.lmmbygls <- function(formula, data=NULL, pheno.id="SUBJECT.NAME",
                                  y=NULL, fit0=NULL, null.formula=NULL,
-                                 num.imp, founders=founders, X.probs, 
+                                 num.imp, founders=founders, X.probs,
                                  K=NULL,
                                  use.par, fix.par=NULL, model=c("additive", "full"), p.value.method=c("LRT", "ANOVA"), locus.as.fixed=TRUE,
                                  use.lmer, impute.map,
                                  brute=TRUE, seed=1, do.augment,
                                  weights=NULL,
+                                 MX0=NULL, My=NULL,
                                  return.allele.effects=FALSE, return.qtl.predictor=FALSE){
   model <- model[1]
   p.value.method <- p.value.method[1]
@@ -80,8 +81,9 @@ multi.imput.lmmbygls <- function(formula, data=NULL, pheno.id="SUBJECT.NAME",
         X <- cbind(fit0$x, X)
         fit1 <- lmmbygls(formula=locus.formula, pheno.id=pheno.id, eigen.K=eigen.K, K=K,
                          y=y, X=X,
-                         logDetV=logDetV, M=M, 
+                         logDetV=logDetV, M=M,
                          use.par="h2", fix.par=fix.par,
+                         MX0=MX0, My=My,
                          brute=brute, weights=weights)
         imp.logLik[i] <- fit1$logLik
         imp.h2[i] <- fit1$h2
