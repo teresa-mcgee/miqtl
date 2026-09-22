@@ -355,8 +355,108 @@ get.allele.effects.from.fixef <- function(fit,
   return(as.vector(scale(effects, center=center, scale=scale)))
 }
 
+#' Founders x treatment-levels matrix of additive allele effects from a GxT interaction fit
+#'
+#' Generalizes get.allele.effects.from.fixef()'s "intercept + beta_f" per-allele-copy convention to a
+#' GxT interaction model, evaluated separately within each treatment arm: effect_f,t = intercept + beta_f
+#' + treatment_main_effect[t] + delta_f,t, where delta_f,t is the fitted founder:treatment interaction
+#' coefficient (0 for the reference founder and reference treatment level, which have no such coefficient
+#' by construction). At the reference treatment level this reduces exactly to get.allele.effects.from.fixef()'s
+#' output. Centering is applied per treatment-level column (each arm's founder profile centered on its own
+#' mean), not globally, so that founder rankings can be compared across arms without conflating that with
+#' any shared treatment-level shift.
+#' @param fit.GxT A GxT interaction model fit (from lmmbygls(), with a locus:treatment interaction design,
+#' as built by scan.h2lmm(GxT.treatment=...)).
+#' @param founders Character vector of founder names.
+#' @param allele.in.intercept The founder absorbed into the intercept (the reference/dropped founder column).
+#' @param treatment DEFAULT: NULL. The raw treatment vector used to build fit.GxT's interaction design; used
+#' only to recover treatment level names/order (must match exactly, including any factor releveling already
+#' applied upstream).
+#' @param center DEFAULT: TRUE.
+#' @param scale DEFAULT: FALSE.
+#' @export get.allele.effects.from.fixef.GxT
+get.allele.effects.from.fixef.GxT <- function(fit.GxT,
+                                              founders,
+                                              allele.in.intercept,
+                                              treatment,
+                                              center=TRUE,
+                                              scale=FALSE){
+  treatment <- as.factor(treatment)
+  treatment.levels <- levels(treatment)
+  ref.level <- treatment.levels[1]
+  non.ref.levels <- treatment.levels[-1]
+
+  effects <- matrix(NA, nrow=length(founders), ncol=length(treatment.levels),
+                    dimnames=list(founders, treatment.levels))
+
+  base.effects <- fit.GxT$coefficients[founders]
+  names(base.effects) <- founders
+  base.effects <- base.effects + fit.GxT$coefficients["(Intercept)"]
+  base.effects[allele.in.intercept] <- fit.GxT$coefficients["(Intercept)"]
+  effects[, ref.level] <- base.effects
+
+  for(lvl in non.ref.levels){
+    trt.main <- fit.GxT$coefficients[lvl]
+    if(is.na(trt.main)){ trt.main <- 0 }
+    lvl.effects <- base.effects
+    for(f in setdiff(founders, allele.in.intercept)){
+      delta <- fit.GxT$coefficients[paste(f, lvl, sep=".")]
+      if(!is.na(delta)){ lvl.effects[f] <- lvl.effects[f] + delta }
+    }
+    effects[, lvl] <- lvl.effects + trt.main
+  }
+
+  if(center | scale){
+    effects <- apply(effects, 2, function(col) as.vector(scale(col, center=center, scale=scale)))
+    rownames(effects) <- founders
+  }
+  return(effects)
+}
+
+#' Founders x (treatment-levels - 1) matrix of raw interaction (delta) coefficients from a GxT fit
+#'
+#' The founder:treatment interaction coefficients directly, one column per non-reference treatment level.
+#' Unlike get.allele.effects.from.fixef.GxT(), this is not a derived reaction-norm value but the fitted
+#' model's own delta_f,t terms: how much founder f's effect shifts in treatment arm t relative to the
+#' reference arm. The reference founder and reference treatment level are always 0 (no such coefficient
+#' exists), which is the meaningful zero point here -- unlike additive allele effects, centering would
+#' obscure rather than clarify, so it defaults to FALSE.
+#' @param fit.GxT A GxT interaction model fit (from lmmbygls(), with a locus:treatment interaction design).
+#' @param founders Character vector of founder names.
+#' @param allele.in.intercept The founder absorbed into the intercept (the reference/dropped founder column).
+#' @param treatment DEFAULT: NULL. The raw treatment vector used to build fit.GxT's interaction design.
+#' @param center DEFAULT: FALSE.
+#' @param scale DEFAULT: FALSE.
+#' @export get.interaction.deltas.from.fixef
+get.interaction.deltas.from.fixef <- function(fit.GxT,
+                                              founders,
+                                              allele.in.intercept,
+                                              treatment,
+                                              center=FALSE,
+                                              scale=FALSE){
+  treatment <- as.factor(treatment)
+  non.ref.levels <- levels(treatment)[-1]
+  non.ref.founders <- setdiff(founders, allele.in.intercept)
+
+  deltas <- matrix(0, nrow=length(founders), ncol=length(non.ref.levels),
+                   dimnames=list(founders, non.ref.levels))
+
+  for(lvl in non.ref.levels){
+    for(f in non.ref.founders){
+      delta <- fit.GxT$coefficients[paste(f, lvl, sep=".")]
+      if(!is.na(delta)){ deltas[f, lvl] <- delta }
+    }
+  }
+
+  if(center | scale){
+    deltas <- apply(deltas, 2, function(col) as.vector(scale(col, center=center, scale=scale)))
+    rownames(deltas) <- founders
+  }
+  return(deltas)
+}
+
 #' @export get.allele.effects.from.ranef
-get.allele.effects.from.ranef <- function(fit, 
+get.allele.effects.from.ranef <- function(fit,
                                           founders=NULL, 
                                           center=TRUE, 
                                           scale=FALSE){

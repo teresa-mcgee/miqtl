@@ -127,11 +127,14 @@ available memory (SLURM allocation, cgroup limit, or OS-level, in that order) is
 NULL skips memory-based capping.}
 
 \item{GxT.treatment}{DEFAULT: NULL. Column name in data of a treatment/environment variable. When specified, each locus
-additionally fits a genotype-by-treatment interaction model (locus main effect + locus:treatment) and reports a second
-LRT (LOD.GxT/p.value.GxT/df.GxT) of that interaction model against the locus main-effect model -- i.e. the null for
-this test is the main-effect model, not the covariates-only null, since the question is whether the locus effect
-differs by treatment, not whether a locus effect exists at all (that is still LOD/p.value, unchanged). Only supported
-with locus.as.fixed=TRUE; not combined with do.augment (augmented rows have no real treatment assignment).}
+additionally fits a genotype-by-treatment interaction model (locus main effect + treatment main effect + locus:treatment)
+and reports a second LRT (LOD.GxT/p.value.GxT/df.GxT) of that interaction model against a locus + treatment main-effect
+model -- i.e. the null for this test already includes the treatment main effect (auto-included here, not left to the
+user's formula, to respect marginality), since the question is whether the locus effect differs by treatment, not
+whether a locus effect or a treatment effect exists at all (that is still LOD/p.value, unchanged, and untouched by
+GxT.treatment). Only supported with locus.as.fixed=TRUE; not combined with do.augment (augmented rows have no real
+treatment assignment). When return.allele.effects=TRUE, also returns allele.effects.GxT (founders x treatment-levels
+per-arm allele effects) and allele.effects.GxT.delta (founders x (treatment-levels-1) raw interaction coefficients).}
 }
 \description{
 This function primarily takes a formula, data frame, and genome cache to run a genome scan.

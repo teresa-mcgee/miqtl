@@ -14,13 +14,25 @@ multi.imput.lmmbygls <- function(formula, data=NULL, pheno.id="SUBJECT.NAME",
   p.value.method <- p.value.method[1]
   eigen.K <- logDetV <- M <- allele.effects <- qtl.predictor <- NULL
   imp.LOD.GxT <- imp.p.value.GxT <- NULL
+  imp.allele.effects.GxT <- imp.allele.effects.GxT.delta <- NULL
+  GxT.T.design <- GxT.treatment.levels <- NULL
   if(!is.null(GxT.treatment)){
     imp.LOD.GxT <- imp.p.value.GxT <- rep(0, num.imp)
+    ## Treatment doesn't vary by imputation, so its dummy design is built
+    ## once here rather than rebuilt inside the per-imputation loop below.
+    GxT.T.design <- make.treatment.design(treatment)
+    GxT.treatment.levels <- levels(as.factor(treatment))
   }
   ## For allele effect plots
-  if(return.allele.effects){ 
+  if(return.allele.effects){
     allele.effects <- matrix(NA, nrow=length(founders), ncol=num.imp,
                              dimnames=list(founders, paste0("imp", 1:num.imp)))
+    if(!is.null(GxT.treatment)){
+      imp.allele.effects.GxT <- array(NA, dim=c(length(founders), length(GxT.treatment.levels), num.imp),
+                                      dimnames=list(founders, GxT.treatment.levels, paste0("imp", 1:num.imp)))
+      imp.allele.effects.GxT.delta <- array(NA, dim=c(length(founders), length(GxT.treatment.levels) - 1, num.imp),
+                                            dimnames=list(founders, GxT.treatment.levels[-1], paste0("imp", 1:num.imp)))
+    }
   }
   ## For conditional scans through residuals
   if(return.qtl.predictor){
@@ -105,20 +117,37 @@ multi.imput.lmmbygls <- function(formula, data=NULL, pheno.id="SUBJECT.NAME",
           qtl.predictor[,i] <- regress.out.qtl(fit1=fit1, null.formula=null.formula, alt.formula=locus.formula,
                                                locus.as.fixed=locus.as.fixed)
         }
-        ## GxT interaction test for this imputation: null is fit1 (locus
-        ## main effect), not fit0 -- same rationale as scan.h2lmm()'s ROP
-        ## path. Reuses fit0/fit1's M/logDetV/MX0/My exactly as fit1 did.
+        ## GxT interaction test for this imputation: null is fit1.treatment
+        ## (locus main effect + treatment main effect), not fit1 (no
+        ## treatment term) or fit0 -- same marginality rationale as
+        ## scan.h2lmm()'s ROP path. Reuses fit0's M/logDetV/MX0/My
+        ## throughout, same as fit1.
         if(!is.null(GxT.treatment)){
           X.int <- make.interaction.design(X=X.locus, treatment=treatment)
+          fit1.treatment <- lmmbygls(pheno.id=pheno.id, eigen.K=eigen.K, K=K,
+                                     y=y, X=cbind(fit1$x, GxT.T.design),
+                                     logDetV=logDetV, M=M,
+                                     use.par="h2", fix.par=fix.par,
+                                     MX0=MX0, My=My,
+                                     brute=brute, weights=weights)
           fit1.GxT <- lmmbygls(formula=make.GxT.formula(formula=formula, X=X.locus, GxT.treatment=GxT.treatment, do.augment=do.augment),
                                pheno.id=pheno.id, eigen.K=eigen.K, K=K,
-                               y=y, X=cbind(fit1$x, X.int),
+                               y=y, X=cbind(fit1.treatment$x, X.int),
                                logDetV=logDetV, M=M,
                                use.par="h2", fix.par=fix.par,
                                MX0=MX0, My=My,
                                brute=brute, weights=weights)
-          imp.LOD.GxT[i] <- log10(exp(fit1.GxT$logLik - fit1$logLik))
-          imp.p.value.GxT[i] <- get.p.value(fit0=fit1, fit1=fit1.GxT, method=p.value.method)
+          imp.LOD.GxT[i] <- log10(exp(fit1.GxT$logLik - fit1.treatment$logLik))
+          imp.p.value.GxT[i] <- get.p.value(fit0=fit1.treatment, fit1=fit1.GxT, method=p.value.method)
+
+          if(return.allele.effects){
+            imp.allele.effects.GxT[,,i] <- get.allele.effects.from.fixef.GxT(fit.GxT=fit1.GxT, founders=founders,
+                                                                              allele.in.intercept=founders[max.column],
+                                                                              treatment=treatment)
+            imp.allele.effects.GxT.delta[,,i] <- get.interaction.deltas.from.fixef(fit.GxT=fit1.GxT, founders=founders,
+                                                                                    allele.in.intercept=founders[max.column],
+                                                                                    treatment=treatment)
+          }
         }
       }
       else{
@@ -146,6 +175,8 @@ multi.imput.lmmbygls <- function(formula, data=NULL, pheno.id="SUBJECT.NAME",
               LOD.GxT=imp.LOD.GxT,
               p.value.GxT=imp.p.value.GxT,
               allele.effects=allele.effects,
+              allele.effects.GxT=imp.allele.effects.GxT,
+              allele.effects.GxT.delta=imp.allele.effects.GxT.delta,
               qtl.predictor=qtl.predictor,
               locus.effect.type=fit1$locus.effect.type))
 }
