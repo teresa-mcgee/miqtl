@@ -1,3 +1,42 @@
+## Selects the founders x loci (x imp) allele-effect array to plot, for
+## GxT.type="main" (plain scan.object$allele.effects, unchanged) or
+## "by.treatment"/"delta" (a single treatment-level slice of
+## scan.object$allele.effects.GxT / allele.effects.GxT.delta). R's automatic
+## dimension-dropping on a single-index slice (founders x loci x levels (x
+## imp) -> founders x loci (x imp)) reduces exactly to the shape the rest of
+## allele.plotter.whole()/allele.plotter.region() already expect, so no
+## other plotting logic needs to change for the GxT case -- this is the only
+## new code; everything downstream (position ordering, CI ribbons,
+## chromosome shading, legend) is shared and untouched.
+select.allele.effects.for.plot <- function(scan.object, GxT.type, GxT.level){
+  GxT.type <- GxT.type[1]
+  if(GxT.type == "main"){
+    return(list(allele.effects=scan.object$allele.effects, GxT.level=NULL))
+  }
+  if(is.null(scan.object$GxT.treatment)){
+    stop("scan.object has no GxT.treatment results (re-run scan.h2lmm with GxT.treatment=... and return.allele.effects=TRUE)", call.=FALSE)
+  }
+  full.array <- if(GxT.type == "by.treatment") scan.object$allele.effects.GxT else scan.object$allele.effects.GxT.delta
+  if(is.null(full.array)){
+    stop("No GxT allele effects in scan object. Re-run scan.h2lmm with GxT.treatment=... and return.allele.effects=TRUE", call.=FALSE)
+  }
+  level.names <- dimnames(full.array)[[3]]
+  if(is.null(GxT.level)){
+    GxT.level <- level.names[1]
+    cat("GxT.level not specified; defaulting to '", GxT.level, "'\n", sep="")
+  }
+  else if(!(GxT.level %in% level.names)){
+    stop("GxT.level '", GxT.level, "' not found; available levels: ", paste(level.names, collapse=", "), call.=FALSE)
+  }
+  if(length(dim(full.array)) == 4){
+    allele.effects <- full.array[, , GxT.level, ]
+  }
+  else{
+    allele.effects <- full.array[, , GxT.level]
+  }
+  return(list(allele.effects=allele.effects, GxT.level=GxT.level))
+}
+
 #' Plot the regression coefficients or BLUPs as allele effects for a genome scan (whole genomes or subset of chromosomes)
 #'
 #' This function takes a genome scan object from scan.h2lmm() and plots out allele effect estimates
@@ -25,6 +64,14 @@
 #' @param axis.cram DEFAULT: TRUE. This makes the plot much more likely to include all chromosome labels. With small plots, this could
 #' lead to overlapping labels.
 #' @param include.x.axis.line DEFAULT: TRUE. IF TRUE, this option adds an x-axis line with ticks between chromosomes.
+#' @param GxT.type DEFAULT: "main". "main" plots scan.object$allele.effects as before. "by.treatment" plots
+#' scan.object$allele.effects.GxT for a single treatment arm (GxT.level) -- each founder's estimated allele
+#' effect within that arm. "delta" plots scan.object$allele.effects.GxT.delta for a single non-reference
+#' treatment arm -- each founder's interaction coefficient (how much its effect shifts in that arm relative
+#' to the reference arm). Requires a scan.object from scan.h2lmm(GxT.treatment=..., return.allele.effects=TRUE).
+#' @param GxT.level DEFAULT: NULL. Which treatment level to plot when GxT.type is "by.treatment" or "delta".
+#' Defaults to the first available level (with a message) if unspecified. To compare arms side by side, call
+#' this function once per level (e.g. within par(mfrow=c(1,2))) rather than overlaying them in one call.
 #' @export
 #' @examples allele.plotter.whole()
 allele.plotter.whole <- function(scan.object, just.these.chr=NULL,
@@ -44,10 +91,16 @@ allele.plotter.whole <- function(scan.object, just.these.chr=NULL,
                                  my.x.lab.cex=0.7,
                                  no.title=FALSE, override.title=NULL,
                                  add.chr.to.label=FALSE, alternative.labels=NULL,
-                                 axis.cram=TRUE, include.x.axis.line=TRUE)
+                                 axis.cram=TRUE, include.x.axis.line=TRUE,
+                                 GxT.type=c("main", "by.treatment", "delta"), GxT.level=NULL, my.y.lab=NULL)
 {
-  allele.effects <- scan.object$allele.effects
-  
+  GxT.type <- GxT.type[1]
+  GxT.selection <- select.allele.effects.for.plot(scan.object, GxT.type, GxT.level)
+  allele.effects <- GxT.selection$allele.effects
+  if(is.null(my.y.lab)){
+    my.y.lab <- if(GxT.type == "delta") "Founder x treatment interaction (delta)" else "Additive allele effects"
+  }
+
   if(length(my.lwd) == 1){
     my.lwd <- rep(my.lwd, 8)
   }
@@ -159,14 +212,17 @@ allele.plotter.whole <- function(scan.object, just.these.chr=NULL,
                                                 sum(scan.object$fit0$weights)), 2)))
     }
     else{
-      this.title <- c(main, 
+      this.title <- c(main,
                       paste0(scan.object$formula, " + ", locus.term, " (", scan.object$model.type, ")"),
                       paste("n =", round(sum(scan.object$fit0@resp$weights), 2)))
     }
   }
+  if(GxT.type != "main"){
+    this.title <- c(this.title, paste0("GxT ", GxT.type, ": ", GxT.selection$GxT.level))
+  }
   if(no.title){ this.title <- NULL }
   if(!is.null(override.title)){ this.title <- override.title }
-  
+
   x.max <- sum(max.pos)+(length(chr.types)-1)
   plot(0, pch="",
        xlim=c(0, x.max), 
@@ -174,7 +230,7 @@ allele.plotter.whole <- function(scan.object, just.these.chr=NULL,
        xaxt="n", yaxt="n", xlab="", ylab="", main=this.title,
        frame.plot=FALSE, type="l", cex=0.5, lwd=1.5, col=main.colors[1])
   axis(side=2, at=sort(unique(c(0, y.min, y.min:y.max, y.max))), las=2, cex.axis=my.y.axis.cex)
-  mtext(text="Additive allele effects", side=2, line=my.y.line, cex=my.y.lab.cex)
+  mtext(text=my.y.lab, side=2, line=my.y.line, cex=my.y.lab.cex)
   label.spots <- max.pos[1]/2
   x.tick.spots <- c(0, max.pos[1])
   
@@ -280,9 +336,17 @@ allele.plotter.whole <- function(scan.object, just.these.chr=NULL,
   }
 }
 
+#' @param GxT.type DEFAULT: "main". "main" plots scan.object$allele.effects as before. "by.treatment" plots
+#' scan.object$allele.effects.GxT for a single treatment arm (GxT.level) -- each founder's estimated allele
+#' effect within that arm. "delta" plots scan.object$allele.effects.GxT.delta for a single non-reference
+#' treatment arm -- each founder's interaction coefficient (how much its effect shifts in that arm relative
+#' to the reference arm). Requires a scan.object from scan.h2lmm(GxT.treatment=..., return.allele.effects=TRUE).
+#' @param GxT.level DEFAULT: NULL. Which treatment level to plot when GxT.type is "by.treatment" or "delta".
+#' Defaults to the first available level (with a message) if unspecified. To compare arms side by side, call
+#' this function once per level (e.g. within par(mfrow=c(1,2))) rather than overlaying them in one call.
 #' @export
 allele.plotter.region <- function(scan.object,
-                                  scale="Mb", 
+                                  scale="Mb",
                                   chr, region.min=NULL, region.max=NULL,
                                   imp.confint.alpha=NULL,
                                   main.colors=c(rgb(240, 240, 0, maxColorValue=255), # yellow
@@ -296,16 +360,22 @@ allele.plotter.region <- function(scan.object,
                                   use.legend=TRUE, main="", my.bty="n", my.lwd=rep(1.25, 8),
                                   set.plot.limit=c(-5, 5), # Null places no limit on y-axis
                                   my.legend.cex=0.7, my.legend.pos="topright", transparency=0.6,
-                                  y.max.manual=NULL, y.min.manual=NULL, 
-                                  my.y.lab = "Haplotype effects",
+                                  y.max.manual=NULL, y.min.manual=NULL,
+                                  my.y.lab = NULL,
                                   my.y.line=2, my.y.axis.cex=1, my.y.lab.cex=1,
                                   my.title.line=0.5, my.title.cex=1,
                                   no.title=FALSE, override.title=NULL,
                                   alternative.labels=NULL,
-                                  rug.pos=NULL, rug.col="gray50")
+                                  rug.pos=NULL, rug.col="gray50",
+                                  GxT.type=c("main", "by.treatment", "delta"), GxT.level=NULL)
 {
-  allele.effects <- scan.object$allele.effects
-  
+  GxT.type <- GxT.type[1]
+  GxT.selection <- select.allele.effects.for.plot(scan.object, GxT.type, GxT.level)
+  allele.effects <- GxT.selection$allele.effects
+  if(is.null(my.y.lab)){
+    my.y.lab <- if(GxT.type == "delta") "Founder x treatment interaction (delta)" else "Haplotype effects"
+  }
+
   if(length(my.lwd) == 1){
     my.lwd <- rep(my.lwd, 8)
   }
@@ -394,14 +464,17 @@ allele.plotter.region <- function(scan.object,
                                                 sum(scan.object$fit0$weights)), 2)))
     }
     else{
-      this.title <- c(main, 
+      this.title <- c(main,
                       paste0(scan.object$formula, " + ", locus.term, " (", scan.object$model.type, ")"),
                       paste("n =", round(sum(scan.object$fit0@resp$weights), 2)))
     }
   }
+  if(GxT.type != "main"){
+    this.title <- c(this.title, paste0("GxT ", GxT.type, ": ", GxT.selection$GxT.level))
+  }
   if(no.title){ this.title <- NULL }
   if(!is.null(override.title)){ this.title <- override.title }
-  
+
   this.xlab <- paste0("Chr ", chr, " Position (", scale, ")")
   
   plot(0, pch="",

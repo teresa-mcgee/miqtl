@@ -33,7 +33,10 @@ allele.plotter.whole(
   add.chr.to.label = FALSE,
   alternative.labels = NULL,
   axis.cram = TRUE,
-  include.x.axis.line = TRUE
+  include.x.axis.line = TRUE,
+  GxT.type = c("main", "by.treatment", "delta"),
+  GxT.level = NULL,
+  my.y.lab = NULL
 )
 }
 \arguments{
@@ -76,6 +79,19 @@ founder alleles.}
 lead to overlapping labels.}
 
 \item{include.x.axis.line}{DEFAULT: TRUE. IF TRUE, this option adds an x-axis line with ticks between chromosomes.}
+
+\item{GxT.type}{DEFAULT: "main". "main" plots scan.object$allele.effects as before. "by.treatment" plots
+scan.object$allele.effects.GxT for a single treatment arm (GxT.level) -- each founder's estimated allele
+effect within that arm. "delta" plots scan.object$allele.effects.GxT.delta for a single non-reference
+treatment arm -- each founder's interaction coefficient (how much its effect shifts in that arm relative
+to the reference arm). Requires a scan.object from scan.h2lmm(GxT.treatment=..., return.allele.effects=TRUE).}
+
+\item{GxT.level}{DEFAULT: NULL. Which treatment level to plot when GxT.type is "by.treatment" or "delta".
+Defaults to the first available level (with a message) if unspecified. To compare arms side by side, call
+this function once per level (e.g. within par(mfrow=c(1,2))) rather than overlaying them in one call.}
+
+\item{my.y.lab}{DEFAULT: NULL. Y-axis label. Defaults to "Additive allele effects", or "Founder x treatment
+interaction (delta)" when GxT.type="delta".}
 }
 \description{
 This function takes a genome scan object from scan.h2lmm() and plots out allele effect estimates
